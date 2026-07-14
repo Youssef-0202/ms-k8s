@@ -88,3 +88,66 @@ VII- Choose Internal Communication Pattern (synchrone vs asynchrone) :
    - Pros: Maximum decoupling, high availability (resilient during consumer crashes), high throughput.
    - Cons: Complex transaction patterns (requires Saga or Outbox logic), eventual consistency lag.
    - Best for: Non-critical operations (emailing, invoicing, async cache updates, database replicas updates).
+
+VIII- Gateway Circuit Breaker & Fallback System (Resilience4J) :
+
+1. Configuration in Routes :
+   - Gateway routes use a filter to intercept network errors/timeouts :
+     `.filter(CircuitBreakerFilterFunctions.circuitBreaker("productServiceCircuitBreaker", URI.create("forward:/fallbackRoute")))`
+   - If target service fails, traffic is intercepted and forwarded internally to `/fallbackRoute`.
+
+2. The /fallbackRoute Implementation (Missing by Default) :
+   - If not created, client gets generic 404 blockages when service is down.
+   - Fix Option A (Local Route inside Routes.java) :
+     @Bean
+     public RouterFunction<ServerResponse> fallbackRoute() {
+         return route("fallback_route")
+                 .GET("/fallbackRoute", request -> 
+                     ServerResponse.status(HttpStatus.SERVICE_UNAVAILABLE)
+                         .contentType(MediaType.APPLICATION_JSON)
+                         .body("{\"message\": \"Service is temporarily down. Please try again later.\"}")
+                 ).build();
+     }
+   - Fix Option B (Fallback Controller) : Custom @RestController mapping "/fallbackRoute" to return JSON.
+
+3. The Three States of Circuit Breaker :
+   - CLOSED (Default) : Traffic flows normally. Error rates/timeouts are monitored in sliding windows (e.g. 10 calls). If error rate > 50%, circuit transitions to OPEN.
+   - OPEN : Prevents flooding a down service. Intercepts all traffic immediately and redirects to /fallbackRoute. Keeps this state for cool-down timer (e.g. 5s).
+   - HALF-OPEN : Lets limited test calls pass (e.g. 3 calls) to verify service recovery. If ALL succeed -> transitions back to CLOSED (recovered). If any fails -> returns to OPEN state.
+
+IX- Frontend Error Handling (Axios + Spring Boot @ControllerAdvice) :
+
+RULE: Axios automatically throws an exception (AxiosError) for any HTTP response with status >= 400.
+      Always handle errors in the component/page layer (App.jsx), NOT in the service layer (apiService.js).
+      The service layer must only propagate errors with `throw error`.
+
+1. Case 1 - Server responded with error (4xx/5xx) :
+   - err.response EXISTS
+   - err.response.status    → HTTP code (400, 404, 409, 500...)
+   - err.response.data      → Body of the Spring Boot error response (JSON from @ControllerAdvice)
+   - err.response.data.message → The actual business error message (e.g. "Product 'ps-01' not found")
+   - Usage : const msg = err.response.data?.message || JSON.stringify(err.response.data);
+
+2. Case 2 - No response received (service DOWN / network timeout) :
+   - err.response is UNDEFINED
+   - err.request EXISTS (request was built and sent, but no response came back)
+   - err.code = "ERR_NETWORK" or "ECONNABORTED"
+   - Usage : Show "Service inaccessible. Check that backend is running."
+
+3. Case 3 - Axios configuration error (bad URL, etc.) :
+   - err.response is UNDEFINED, err.request is UNDEFINED
+   - err.message contains the Axios internal error (e.g. "Invalid URL")
+   - Usage : Show `Erreur de configuration : ${err.message}`
+
+4. Complete pattern to use in catch blocks (App.jsx) :
+   catch (err) {
+     if (err.response) {
+       // SPRING BOOT MESSAGE : err.response.data.message
+       const msg = err.response.data?.message || JSON.stringify(err.response.data);
+       setError(`[${err.response.status}] ${msg}`);
+     } else if (err.request) {
+       setError("Service inaccessible. Vérifiez que le backend est démarré.");
+     } else {
+       setError(`Erreur de configuration : ${err.message}`);
+     }
+   }

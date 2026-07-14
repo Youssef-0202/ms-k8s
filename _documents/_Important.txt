@@ -71,6 +71,20 @@ VI- deployment in kubernest:
     . Create deployemnt sql  
             kubectl apply -f mysql-dep.yml
             mvn spring-boot:build-image -DskipTests -Ddocker.password=<Dcker_pass>
+VII- Choose Internal Communication Pattern (synchrone vs asynchrone) :
 
+1. Sync HTTP/REST (eg. OpenFeign or Spring 6 RestClient HTTP Interface) :
+   - Pros: Simple, transparent JSON logs, easy debugging with Postman, low learning curve.
+   - Cons: CPU/bandwidth verbosity, slower (HTTP 1.1 + text deserialization), tight coupling.
+   - Best for: Outer-facing APIs (Front to Gateway) or simple Back-to-Back links where latency is not a critical bottleneck.
+   - Note for Inventory: Crucial to keep synchrone links (REST/gRPC) for checkout balance deduction (prevents overselling/race conditions on stock limits).
 
+2. Sync gRPC (HTTP/2 + Protocol Buffers) :
+   - Pros: Extremely fast (up to 10x faster than REST), compact binary payload, code contracts generated via .proto templates.
+   - Cons: Higher setup complexity, browser client incompatibility (requires gRPC-Web proxy), harder debugging without tools.
+   - Best for: Internal Back-to-Back microservice links in heavy load enterprise architectures.
 
+3. Async Message Brokers (Kafka / RabbitMQ) :
+   - Pros: Maximum decoupling, high availability (resilient during consumer crashes), high throughput.
+   - Cons: Complex transaction patterns (requires Saga or Outbox logic), eventual consistency lag.
+   - Best for: Non-critical operations (emailing, invoicing, async cache updates, database replicas updates).

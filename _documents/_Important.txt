@@ -1,0 +1,76 @@
+I - pour la connexion synchrone (oreder <---> inventory) utilisent  Spring Cloud Open Feign :
+  1- ajouter les dependences
+        <dependency>
+			<groupId>org.springframework.cloud</groupId>
+			<artifactId>spring-cloud-starter-openfeign</artifactId>
+		</dependency>
+  2- ajouter @EnableFeignClients orderApplcationClass 
+  3- creer linterface InventoryClient 
+@FeignClient(value = "inventory",url = "${inventory.url}")
+public interface InventoryClient {
+
+    @RequestMapping(method = RequestMethod.GET , value = "/api/inventory")
+    boolean isInStock(@RequestParam String skuCode , @RequestParam Integer quantity);
+}
+  4- appeler dans le service : private final InventoryClient inventoryClient;
+  5- utilser dans la logique necessaire 
+
+II-  API Gateway usinf Spring Cloud Gateway MVC :  (to search <Functional endpoints models !!>):
+
+Spring Cloud Gateway originally was reactive only, based on WebFlux and Netty.
+Not all applications use reactive programming. Some still use the traditional, blocking Spring MVC.
+So, the Spring team decided to offer two gateway implementations:
+One reactive for apps built with WebFlux.
+One blocking (MVC) for apps built with Spring MVC.
+This allows developers to choose the gateway that best matches their app’s architecture.
+
+
+III- replace Spring Cloud Open Feign by Spring Interface Client (Rest Client)
+
+IV- add Circuit Breaker using Resilience4J :
+  1- configuration :
+      resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        registerHealthIndicator: true // Active un endpoint Spring Boot Actuator de santé (/actuator/health) pour le Circuit Breaker.
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 10 // Nombre d’appels à surveiller dans la fenêtre glissante.
+        failureRateThreshold: 50
+        waitDurationInOpenState: 5s
+        permittedNumberOfCallsInHalfOpenState: 3
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        minimumNumberOfCalls: 5
+
+  explication :
+  1- les 10 derniers appels seront pris en compte pour évaluer les échecs.
+  2- 5 échouent → 50% d’échec → dépasse le failureRateThreshold.
+  3- Le circuit passe à OPEN.
+  4- Attente de 5s → passe à HALF_OPEN.
+  5- 3 appels test sont faits :
+      ✅ Si les 3 réussissent → retourne à CLOSED.
+      ❌ Si un échoue → retourne à OPEN. 
+
+V- integrate Kafka to asynchronus connection between order and notification :
+
+
+VI- deployment in kubernest:
+1- transform it to mono repo :
+   . Centralized Management: All services and infrastructure are versioned together.
+   . Shared Dependencies: Likely uses a parent pom.xml for consistent Spring Boot/Library versions.
+   . Local Development: docker-compose allows running the entire stack locally.
+
+2- use cloude native buildpacks to transform application source code into container images 
+   that can run on cloud :
+    Spring Boot automatically uses Cloud Native Buildpacks (via https://buildpacks.io) to build Docker images without requiring a Dockerfile when you use: mvn spring-boot:build-image
+   . configure pom route folder (docker image name + credentiels )
+   . run mvn spring-boot:build-image -DskipTests -Ddocker.password=<Dcker_pass>
+
+3- create local kubernates clustur using kind :
+    . Creating cluster "microservices": kind create cluster --name microservices --config kind-config.yaml
+    . Create deployemnt sql  
+            kubectl apply -f mysql-dep.yml
+            mvn spring-boot:build-image -DskipTests -Ddocker.password=<Dcker_pass>
+
+
+

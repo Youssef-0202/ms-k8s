@@ -53,8 +53,39 @@ IV- add Circuit Breaker using Resilience4J :
 
 V- integrate Kafka to asynchronus connection between order and notification :
 
+  A - Kafka Microservices Architecture & Flow :
+    1- Core Concepts :
+       - Topic : Named category/queue where events are written (e.g., "order-placed"). It acts as a mailbox.
+       - Producer : The service sending the event (order-service) via Spring's predefined 'KafkaTemplate'.
+       - Consumer : The service reading the event (notification-service) via the '@KafkaListener' annotation.
+       - Serializer / Deserializer :
+         . Producer uses 'KafkaAvroSerializer' to encode Java objects into compact Avro binary format.
+         . Consumer uses 'KafkaAvroDeserializer' to decode Avro binary packets back into Java objects.
+       - Schema Registry (Port 8085) : Central validation point ensuring both services conform to the same data schema.
+    2- Communication Flow :
+       - OrderService creates and saves order -> Generates orderPlacedEvent (defined in .avsc schema).
+       - OrderService publishes the event to topic: `kafkaTemplate.send("order-placed", orderPlacedEvent)`.
+       - Spring sends response 200 immediately to frontend (decoupled execution, non-blocking checkouts).
+       - NotificationService consumes event: `@KafkaListener(topics = "order-placed") public void listen(OrderPlacedEvent event)`.
+       - NotificationService processes event and sends transaction confirmation email via JavaMailSender (Mailtrap).
 
-VI- deployment in kubernest:
+  B - Shared Library Concept (Jar Sharing) :
+    1- Definition : Instead of duplicating schema (.avsc) files and class generation configuration inside every microservice, shared types are compiled into a standalone Maven project (e.g. `event-library`), packaged into a `.jar` library, and installed in the local machine's repository cache (`.m2` cache).
+    2- Implementation Steps :
+       - Step 1: Create an `event-library` directory. Inside `pom.xml`, add `avro` dependency and the `avro-maven-plugin` to generate classes under `/target/generated-sources/avro`.
+       - Step 2: Write schemas in `src/main/resources/avro/order-placed.avsc`.
+       - Step 3: Run `mvn clean install` inside `event-library`. This compiles classes and loads the built `.jar` file directly into your local `.m2/repository`.
+       - Step 4: Delete all local duplicates of schemas and generated classes under `/src/` directories of `order-service` and `notification-service`.
+       - Step 5: Add a standard Maven dependency in the `pom.xml` of both producer and consumer projects :
+         <dependency>
+             <groupId>com.techie.microservices</groupId>
+             <artifactId>event-library</artifactId>
+             <version>1.0.0</version>
+         </dependency>
+       - Step 6: Trigger "Reload All Maven Projects" in IntelliJ. Import and use the shared classes seamlessly:
+         `import com.techie.microservice.order.event.OrderPlacedEvent;`
+
+VI- deployment in kubernest :
 1- transform it to mono repo :
    . Centralized Management: All services and infrastructure are versioned together.
    . Shared Dependencies: Likely uses a parent pom.xml for consistent Spring Boot/Library versions.

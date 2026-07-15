@@ -1,0 +1,3 @@
+com\techie\microservice\order\event\OrderPlacedEvent$1.class
+com\techie\microservice\order\event\OrderPlacedEvent.class
+com\techie\microservice\order\event\OrderPlacedEvent$Builder.class

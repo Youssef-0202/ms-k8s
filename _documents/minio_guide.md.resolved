@@ -1,0 +1,381 @@
+# MinIO : Guide Complet (Concepts & Implémentation Spring Boot)
+
+---
+
+## I. Concepts Fondamentaux
+
+### Qu'est-ce que MinIO ?
+MinIO est un serveur de **stockage objet** (Object Storage) open-source et gratuit. Il est 100% compatible avec l'API Amazon S3, ce qui signifie que tout code écrit pour MinIO fonctionne aussi directement avec AWS S3 en production (juste en changeant l'URL de connexion).
+
+> [!NOTE]
+> MinIO est souvent utilisé en développement local pour simuler S3 sans coût et sans connexion Internet.
+
+### Les Concepts Clés
+
+| Concept | Explication simple | Analogie |
+|---|---|---|
+| **Bucket** | Un conteneur logique de rangement nommé | Un dossier principal |
+| **Object** | Un fichier stocké dans un bucket (image, PDF, vidéo...) | Un fichier dans ce dossier |
+| **Object Key** | Le nom unique de l'objet dans le bucket (souvent un UUID) | Le nom du fichier |
+| **Endpoint** | L'URL d'accès à l'API MinIO (ex: `http://localhost:9090`) | L'adresse du serveur |
+| **Access Key** | L'identifiant de connexion (comme un username) | Login |
+| **Secret Key** | Le mot de passe de connexion | Password |
+
+### Architecture de Fonctionnement
+```
+[ Spring Boot : image-service ]
+          │
+          │ SDK MinIO (Java)
+          ▼
+[ MinIO Server : localhost:9090 ]  ←──── Port interne container : 9000
+          │
+          │ Stockage physique (Volume Docker)
+          ▼
+[ Dossier Windows : ./docker/minio/data ]
+```
+
+---
+
+## II. Infrastructure (Docker Compose)
+
+### [docker-compose.yml](file:///C:/Users/HP/OneDrive/Bureau/ms-k8s/order-service/docker-compose.yml) de l'image-service
+```yaml
+version: '4'
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2024-01-28T22-35-53Z
+    container_name: minio
+    ports:
+      - "9090:9000"   # HOST:CONTAINER → Port API MinIO (toujours 9000 en interne)
+      - "9001:9001"   # Console Web d'administration
+    environment:
+      MINIO_ROOT_USER: minioadmin       # Access Key
+      MINIO_ROOT_PASSWORD: minioadmin   # Secret Key
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./docker/minio/data:/data       # Persistance des données sur le disque local
+```
+
+> [!IMPORTANT]
+> La syntaxe Docker pour les ports est toujours **`HOST_PORT:CONTAINER_PORT`**.
+> MinIO écoute TOUJOURS sur le port **9000** à l'intérieur du container (c'est son port par défaut codé en dur). La partie gauche (HOST) est libre, mais la partie droite (CONTAINER) doit être `9000`.
+
+### Commandes Docker utiles
+```bash
+# Démarrer MinIO en arrière-plan
+docker compose up -d
+
+# Vérifier les ports exposés
+docker ps
+
+# Arrêter MinIO (les données restent grâce aux volumes)
+docker compose down
+
+# Arrêter ET supprimer les données (reset complet)
+docker compose down -v
+```
+
+### Console d'Administration Web
+Accessible sur : **http://localhost:9001**
+- **Username** : `minioadmin`
+- **Password** : `minioadmin`
+
+---
+
+## III. Implémentation Spring Boot (image-service)
+
+### Étape 1 : Dépendance Maven ([pom.xml](file:///C:/Users/HP/OneDrive/Bureau/ms-k8s/order-service/pom.xml))
+```xml
+<dependency>
+    <groupId>io.minio</groupId>
+    <artifactId>minio</artifactId>
+    <version>8.5.10</version>
+</dependency>
+```
+
+### Étape 2 : Configuration ([application.properties](file:///C:/Users/HP/OneDrive/Bureau/ms-k8s/order-service/src/main/resources/application.properties))
+```properties
+spring.application.name=image-service
+server.port=8083
+
+# MinIO Connection
+minio.endpoint=http://localhost:9090
+minio.access-key=minioadmin
+minio.secret-key=minioadmin
+minio.bucket-name=product-images
+```
+
+### Étape 3 : Bean de Configuration (`MinioConfig.java`)
+
+> [!WARNING]
+> Le nom de la méthode `@Bean` ne doit PAS être identique au nom de la classe (`MinioConfig`), sinon Spring détecte un conflit de noms de beans et refuse de démarrer. Nomme la méthode `minioClient()`.
+
+```java
+package com.techie.microservice.image.config;
+
+import io.minio.MinioClient;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class MinioConfig {
+
+    @Value("${minio.endpoint}")
+    private String endpoint;
+
+    @Value("${minio.access-key}")
+    private String accessKey;
+
+    @Value("${minio.secret-key}")
+    private String secretKey;
+
+    @Bean
+    public MinioClient minioClient() {  // ✅ Nom différent de la classe !
+        return MinioClient.builder()
+                .endpoint(endpoint)
+                .credentials(accessKey, secretKey)
+                .build();
+    }
+}
+```
+
+### Étape 4 : Service Métier (`ImageService.java`)
+```java
+package com.techie.microservice.image.service;
+
+import io.minio.*;
+import jakarta.annotation.PostConstruct;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.InputStream;
+import java.util.UUID;
+
+@Service
+@Slf4j
+public class ImageService {
+
+    private final MinioClient minioClient;
+
+    @Value("${minio.bucket-name}")
+    private String bucketName;
+
+    public ImageService(MinioClient minioClient) {
+        this.minioClient = minioClient;
+    }
+
+    // ✅ Création automatique du Bucket au démarrage de l'application
+    @PostConstruct
+    public void initBucket() {
+        try {
+            boolean found = minioClient.bucketExists(
+                BucketExistsArgs.builder().bucket(bucketName).build()
+            );
+            if (!found) {
+                log.info("Bucket '{}' introuvable. Création en cours...", bucketName);
+                minioClient.makeBucket(MakeBucketArgs.builder().bucket(bucketName).build());
+                log.info("Bucket '{}' créé avec succès !", bucketName);
+            } else {
+                log.info("Bucket '{}' déjà existant.", bucketName);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Impossible d'initialiser le stockage MinIO", e);
+        }
+    }
+
+    // ✅ Upload d'une image → retourne son ID unique
+    public String uploadImage(MultipartFile file) {
+        String extension = "";
+        String originalFilename = file.getOriginalFilename();
+        if (originalFilename != null && originalFilename.contains(".")) {
+            extension = originalFilename.substring(originalFilename.lastIndexOf("."));
+        }
+        String uniqueFilename = UUID.randomUUID().toString() + extension;
+        try {
+            minioClient.putObject(PutObjectArgs.builder()
+                    .bucket(bucketName)
+                    .object(uniqueFilename)
+                    .stream(file.getInputStream(), file.getSize(), -1)
+                    .contentType(file.getContentType())
+                    .build());
+            return uniqueFilename;
+        } catch (Exception e) {
+            throw new RuntimeException("Échec de l'envoi de l'image", e);
+        }
+    }
+
+    // ✅ Récupération du flux binaire de l'image par son ID
+    public InputStream getImage(String imageId) {
+        try {
+            return minioClient.getObject(
+                GetObjectArgs.builder().bucket(bucketName).object(imageId).build()
+            );
+        } catch (Exception e) {
+            throw new RuntimeException("Impossible de lire l'image : " + imageId, e);
+        }
+    }
+
+    // ✅ Suppression d'une image par son ID
+    public void deleteImage(String imageId) {
+        try {
+            minioClient.removeObject(
+                RemoveObjectArgs.builder().bucket(bucketName).object(imageId).build()
+            );
+        } catch (Exception e) {
+            throw new RuntimeException("Échec de la suppression de l'image : " + imageId, e);
+        }
+    }
+}
+```
+
+### Étape 5 : Contrôleur REST (`ImageController.java`)
+```java
+package com.techie.microservice.image.controller;
+
+import com.techie.microservice.image.service.ImageService;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.http.*;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.InputStream;
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/image")
+public class ImageController {
+
+    private final ImageService imageService;
+
+    public ImageController(ImageService imageService) {
+        this.imageService = imageService;
+    }
+
+    // POST /api/image/upload → retourne { "imageId": "uuid.jpg" }
+    @PostMapping("/upload")
+    public ResponseEntity<Map<String, String>> upload(@RequestParam("file") MultipartFile file) {
+        String imageId = imageService.uploadImage(file);
+        return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("imageId", imageId));
+    }
+
+    // GET /api/image/{id} → retourne le flux binaire de l'image (affiché dans <img src="..."/>)
+    @GetMapping("/{id}")
+    public ResponseEntity<InputStreamResource> getImage(@PathVariable String id) {
+        InputStream stream = imageService.getImage(id);
+        MediaType mediaType = id.toLowerCase().endsWith(".png") ? MediaType.IMAGE_PNG : MediaType.IMAGE_JPEG;
+        return ResponseEntity.ok().contentType(mediaType).body(new InputStreamResource(stream));
+    }
+
+    // DELETE /api/image/{id} → supprime l'image
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> delete(@PathVariable String id) {
+        imageService.deleteImage(id);
+        return ResponseEntity.noContent().build();
+    }
+}
+```
+
+---
+
+## IV. Référence des Endpoints REST
+
+| Méthode | URL | Corps | Réponse |
+|---|---|---|---|
+| `POST` | `/api/image/upload` | `form-data: file=<fichier>` | `{ "imageId": "uuid.jpg" }` |
+| `GET` | `/api/image/{id}` | - | Flux binaire de l'image |
+| `DELETE` | `/api/image/{id}` | - | `204 No Content` |
+
+### Comment utiliser dans le Frontend React :
+```javascript
+// 1. Upload silencieux dès la sélection du fichier
+const handleImageSelect = async (e) => {
+    const file = e.target.files[0];
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await axios.post("/api/image/upload", formData);
+    setImageId(res.data.imageId);  // Stocker l'ID dans le State
+};
+
+// 2. Affichage de l'image dans le catalogue (aucun axios nécessaire !)
+// Le navigateur fait automatiquement un GET sur l'URL de l'image
+<img src={`http://localhost:9000/api/image/${product.imageId}`} alt={product.name} />
+```
+
+> [!NOTE]
+> **Pourquoi pas d'axios pour afficher une image ?**
+> Pour les données JSON (produits, commandes...), tu as besoin d'axios car tu dois parser la réponse et gérer l'authentification.
+> Pour les images, le navigateur fait automatiquement un `HTTP GET` sur l'URL dès qu'il rencontre `<img src="...">`, exactement comme pour n'importe quelle image sur Internet.
+
+---
+
+## V. Sécurité des Images
+
+### La règle fondamentale
+
+| Type d'image | Niveau de confidentialité | Stratégie recommandée |
+|---|---|---|
+| Photos de produits (catalogue) | Publique ✅ | URL directe (situation actuelle) |
+| Photos de profil utilisateurs | Semi-privée | URLs Présignées ⏱️ |
+| Documents confidentiels (factures, contrats) | Privée 🔒 | Gateway + Keycloak |
+
+---
+
+### Option 1 : Images Publiques (Situation Actuelle)
+Tout le monde peut accéder à l'image via son URL sans authentification.
+- **Cas d'usage** : Photos de produits e-commerce, images de blog, logos.
+- **Risque** : Aucun (les images sont volontairement publiques).
+```
+GET http://localhost:9000/api/image/uuid.png  ← Accessible sans token
+```
+
+---
+
+### Option 2 : Protection via Gateway + Keycloak
+Le Gateway intercepte la requête et vérifie le **token JWT** avant de la transmettre à l'`image-service`.
+Un utilisateur non authentifié reçoit une réponse `401 Unauthorized`.
+- **Cas d'usage** : Photos de profil, images liées à un compte utilisateur.
+- **Configuration** : Ajouter la route `/api/image/**` dans Keycloak comme route protégée dans le Gateway.
+
+---
+
+### Option 3 : URLs Présignées MinIO (Standard Enterprise)
+MinIO génère une URL **temporaire et secrète** qui expire automatiquement après un délai configurable.
+Même si quelqu'un vole l'URL, elle sera inutilisable après expiration.
+
+**Côté Java (ImageService.java)** :
+```java
+import io.minio.GetPresignedObjectUrlArgs;
+import io.minio.http.Method;
+import java.util.concurrent.TimeUnit;
+
+public String generatePresignedUrl(String imageId) {
+    try {
+        return minioClient.getPresignedObjectUrl(
+            GetPresignedObjectUrlArgs.builder()
+                .bucket(bucketName)
+                .object(imageId)
+                .expiry(15, TimeUnit.MINUTES)  // URL expirable après 15 min !
+                .method(Method.GET)
+                .build()
+        );
+    } catch (Exception e) {
+        throw new RuntimeException("Impossible de générer l'URL présignée", e);
+    }
+}
+```
+
+**Résultat** : Une URL du type :
+```
+http://localhost:9090/product-images/uuid.png
+  ?X-Amz-Algorithm=AWS4-HMAC-SHA256
+  &X-Amz-Expires=900
+  &X-Amz-Signature=abc123xyz...   ← Signature unique qui expire !
+```
+
+- **Cas d'usage** : Documents médicaux, factures, pièces jointes confidentielles.
+- **Avantage** : Sécurisé même sans Keycloak, compatible avec le frontend React via un endpoint dédié.
+

@@ -1,0 +1,18 @@
+{
+  "type": "record",
+  "name": "PaymentStatusEvent",
+  "namespace": "com.techie.microservice.payment.event",
+  "fields": [
+    { "name": "orderId", "type": "string" },
+    { "name": "paymentStatus", "type": "string" },
+    { "name": "transactionId", "type": "string" },
+    { "name": "amount", "type": {
+            "type": "bytes",
+            "logicalType": "decimal",
+            "precision": 10,
+            "scale": 2
+          }
+        },
+    { "name": "reason", "type": ["null", "string"], "default": null }
+  ]
+}

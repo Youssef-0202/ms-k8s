@@ -180,5 +180,22 @@ RULE: Axios automatically throws an exception (AxiosError) for any HTTP response
        setError("Service inaccessible. Vérifiez que le backend est démarré.");
      } else {
        setError(`Erreur de configuration : ${err.message}`);
-     }
-   }
+    }
+  }
+
+X - Product Image Service & Image Storage Decoupling (MinIO + Gateway Security) :
+
+  1 - Architecture & Database Decoupling :
+      - Instead of storing binary image data directly in the MongoDB product collection, image binary persistence is delegated to a dedicated microservice `image-service` configured with MinIO (S3 compliant object storage).
+      - Collection `products` in MongoDB is updated to persist only a lightweight `imageId` (UUID of the object stored in MinIO).
+      - Product DTOs (`ProductRequest`, `ProductResponse`, `ProductDto`) are updated to handle the `imageId` field.
+
+  2 - Gateway Security Bypass for Public Assets (Keycloak) :
+      - In a microservices architecture secured by Keycloak/OAuth2, direct resource URLs (like <img src="..."/>) will fail with a `401 Unauthorized` status code unless the endpoint is publicly accessible.
+      - Fixed by configuring the Gateway Security filter chain in `SecurityConfig.java` to make the `GET /api/image/**` routes public, while keeping write/mutation paths (`POST`, `DELETE`) protected :
+        `.requestMatchers(HttpMethod.GET, "/api/image/**").permitAll()`
+
+  3 - Frontend Integration Flow :
+      - Step A (Silent Upload) : Immediately upon selecting a file in the product creation modal, the frontend uploads the binary file using `multipart/form-data` to the `image-service` via Gateway, retrieving a returned `imageId` (UUID).
+      - Step B (Metadata Persist) : The final form submit maps the input form state including the `imageId` value to create the product document in `product-service`.
+      - Step C (Re-rendering) : Catalog displays images by passing the stored `/api/image/{imageId}` URL inside a simple `<img>` tag, relying on standard browser automatic GET requests.

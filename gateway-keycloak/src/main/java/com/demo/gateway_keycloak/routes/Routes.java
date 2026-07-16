@@ -89,6 +89,29 @@ public class Routes {
                 .build();
     }
 
+    @Bean
+    public RouterFunction<ServerResponse> imageServiceRoute() {
+        return route("image_service")
+                .route(RequestPredicates.path("/api/image/**"), http("http://localhost:8083"))
+                .filter(CircuitBreakerFilterFunctions.circuitBreaker(
+                        "imageServiceCircuitBreaker",
+                        URI.create("forward:/fallbackRoute")
+                ))
+                .build();
+    }
+
+    @Bean
+    public RouterFunction<ServerResponse> imageServiceSwaggerRoute(){
+        return route("image_service_swagger")
+                .route(RequestPredicates.path("/aggregate/image-service/v3/api-docs"),http("http://localhost:8083"))
+                .filter(CircuitBreakerFilterFunctions.circuitBreaker(
+                        "inventoryServiceSwaggerCircuitBreaker",
+                        URI.create("forward:/fallbackRoute")
+                ))
+                .filter(setPath("/api-docs"))
+                .build();
+    }
+
 
     @Bean
     public RouterFunction<ServerResponse> notificationServiceRoute() {
